@@ -23,6 +23,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 import os
 import sys
 import pty
+import time
 import signal
 from subprocess import Popen, PIPE
 from threading import Thread, Lock
@@ -30,7 +31,10 @@ from threading import Thread, Lock
 
 
 READ_BUF = 4096
+MASTER_STTY_SLEEP = 0.200
+SLAVE_STTY_SLEEP = 0.100
 DEBUG_MODE = True
+
 
 
 '''
@@ -48,10 +52,8 @@ def print(text = '', end = '\n'):
 
 class TermAutopass:
     def __init__(self):
-        self.openterminals = 0
-        
+        self.inhertiedStty = Popen(['stty', '-g'], stdin=sys.stdout, stdout=PIPE, stderr=PIPE).communicate()[0][:-1]
         Popen(['stty', '-icanon', '-echo', '-isig', '-ixoff', '-ixon'], stdin=sys.stdout).wait()
-        
         try:
             termsize = (24, 80)
             for channel in (sys.stderr, sys.stdout, sys.stdin):
@@ -60,7 +62,7 @@ class TermAutopass:
                     termsize = termsize.decode('utf8', 'replace')[:-1].split(' ') # [:-1] removes a \n
                     termsize = [int(item) for item in termsize]
                     break
-            (termh, termw) = termsize
+            (self.termh, self.termw) = termsize
             
             (self.master, self.slave) = pty.openpty()
             self.master_write = os.fdopen(self.master, 'wb')
@@ -68,16 +70,23 @@ class TermAutopass:
             self.slave        = os.fdopen(self.slave,  'wb')
             self.stdin        = os.fdopen(0, 'rb', 0)
             
-            read_thread = ReadThread(self)
-            read_thread.daemon = True
-            read_thread.start()
+            slave_thread = SlaveThread(self)
+            slave_thread.daemon = True
+            slave_thread.start()
             
-            write_thread = WriteThread(self)
-            write_thread.daemon = True
-            write_thread.start()
+            master_thread = MasterThread(self)
+            master_thread.daemon = True
+            master_thread.start()
             
-            sttyFlags = ['icanon', 'brkint', 'imaxbel', 'eol', '255', 'eol2', '255', 'swtch', '255', 'ixany', 'iutf8']
-            Popen(['stty', 'rows',  str(termh), 'columns', str(termw)] + sttyFlags, stdin=self.master_write).wait()
+            master_stty_thread = MasterSTTYThread(self)
+            master_stty_thread.daemon = True
+            master_stty_thread.start()
+            
+            slave_stty_thread = SlaveSTTYThread(self)
+            slave_stty_thread.daemon = True
+            slave_stty_thread.start()
+            
+            Popen(['stty', self.inhertiedStty, 'rows',  str(self.termh), 'columns', str(self.termw)], stdin=self.master_write).wait()
             proc = Popen([os.getenv('SHELL', 'sh')], stdin=self.slave, stdout=self.slave, stderr=self.slave)
             proc.wait()
             
@@ -86,10 +95,11 @@ class TermAutopass:
             self.stdin.close()
         
         finally:
-            Popen(['stty', 'icanon', 'echo', 'isig', 'ixoff', 'ixon'], stdin=sys.stdout).wait()
+            Popen(['stty', self.inhertiedStty], stdin=sys.stdout).wait()
 
 
-class WriteThread(Thread):
+
+class MasterSTTYThread(Thread):
     def __init__(self, term):
         Thread.__init__(self)
         self.term = term
@@ -97,7 +107,65 @@ class WriteThread(Thread):
     def run(self):
         if DEBUG_MODE:
             self.implementation();
-            print('(w)')
+            print('(MasterSTTYThread)')
+        else:
+            try:
+                self.implementation();
+            except:
+                pass
+    
+    def implementation(self):
+        master_write = self.term.master_write
+        master_read = self.term.master_read
+        stdin = self.term.stdin
+        last = str(self.term.termh) + ' ' + str(self.term.termw) + '\n'
+        while not (stdin.closed or master_write.closed or master_read.closed):
+            stty = Popen(['stty', 'size'], stdin=sys.stdout, stdout=PIPE, stderr=PIPE).communicate()[0].decode('utf8', 'replace')
+            if stty != last:
+                last = stty
+                (self.term.termh, self.term.termw) = [int(item) for item in stty[:-1].split(' ')]
+                Popen(['stty', 'rows',  str(self.term.termh), 'columns', str(self.term.termw)], stdin=self.term.master_write).wait()
+            time.sleep(MASTER_STTY_SLEEP)
+
+
+class SlaveSTTYThread(Thread):
+    def __init__(self, term):
+        Thread.__init__(self)
+        self.term = term
+    
+    def run(self):
+        if DEBUG_MODE:
+            self.implementation();
+            print('(SlaveSTTYThread)')
+        else:
+            try:
+                self.implementation();
+            except:
+                pass
+    
+    def implementation(self):
+        master_write = self.term.master_write
+        master_read = self.term.master_read
+        stdin = self.term.stdin
+        last = ''
+        while not (stdin.closed or master_write.closed or master_read.closed):
+            stty = Popen(['stty', '-g'], stdin=master_write, stdout=PIPE, stderr=PIPE).communicate()[0].decode('utf8', 'replace')
+            if stty != last:
+                last = stty
+                Popen(['stty', stty[:-1]], stdin=stdin, stdout=PIPE, stderr=PIPE).wait()
+                Popen(['stty', '-icanon', '-echo', '-isig', '-ixoff', '-ixon'], stdin=stdin).wait()
+            time.sleep(SLAVE_STTY_SLEEP)
+
+
+class MasterThread(Thread):
+    def __init__(self, term):
+        Thread.__init__(self)
+        self.term = term
+    
+    def run(self):
+        if DEBUG_MODE:
+            self.implementation();
+            print('(MasterThread)')
         else:
             try:
                 self.implementation();
@@ -116,7 +184,7 @@ class WriteThread(Thread):
             master_write.flush()
 
 
-class ReadThread(Thread):
+class SlaveThread(Thread):
     def __init__(self, term):
         Thread.__init__(self)
         self.term = term
@@ -124,7 +192,7 @@ class ReadThread(Thread):
     def run(self):
         if DEBUG_MODE:
             self.implementation();
-            print('(r)')
+            print('(SlaveThread)')
         else:
             try:
                 self.implementation();
