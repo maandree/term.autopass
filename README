@@ -1,0 +1,30 @@
+Pseudo-terminal that fill in passphrases for you,
+provided you have entered it once during the session.
+
+This is indented to be used a layer of a stack of
+pseudo-terminals that provides extra features to
+your virtual terminal.
+
+
+Keyboard layout::
+
+During idle state:
+
+C-p C-s  ::  start storing password (enter store state)
+C-p C-r  ::  auto fill password
+C-p C-c  ::  clear all stored passwords
+C-p C-m  ::  toggle auto C-p C-r mode, on by default
+C-p C-p  ::  C-p
+C-p *    ::  ignored
+
+During store state:
+
+C-p C-s  ::  success: store password (return to idle state)
+C-p C-r  ::  failure: retry entering password
+C-p C-c  ::  cancel (return to idle state)
+C-p C-p  ::  C-p
+C-p *    ::  ignored
+
+
+Key labels are identified by the content on the current line.
+
